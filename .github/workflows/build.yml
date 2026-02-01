@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "master"]
   pull_request:
   workflow_dispatch:
 
@@ -17,8 +17,8 @@ jobs:
 
       - name: Build (release)
         run: |
-          cargo build --release --bin two-ip-ru
-          cargo build --release --bin two-ip-ru-gui
+          cargo build --release --locked --bin two-ip-ru
+          cargo build --release --locked --bin two-ip-ru-gui
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -27,4 +27,3 @@ jobs:
           path: |
             target/release/two-ip-ru.exe
             target/release/two-ip-ru-gui.exe
-
