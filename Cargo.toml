@@ -7,11 +7,14 @@ edition = "2024"
 name = "two-ip-ru"
 path = "src/main.rs"
 
+[[bin]]
+name = "two-ip-ru-gui"
+path = "src/bin/gui.rs"
+
 [dependencies]
 
-reqwest = { version = "0.11", features = ["blocking", "json", "stream"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 chrono = "0.4"
-
-
+dioxus = { version = "0.7.3", features = ["desktop"] }

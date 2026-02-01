@@ -47,6 +47,14 @@ Or via Cargo:
 cargo run --release
 ```
 
+## Windows builds
+
+The easiest way to produce a Windows `.exe` from macOS is to let GitHub Actions build it.
+This repo includes a workflow at `.github/workflows/build.yml` that uploads:
+
+- `two-ip-ru.exe`
+- `two-ip-ru-gui.exe`
+
 ### Customization
 By default, it targets Cloudflare's speed test file. You can override this by passing a URL as an argument:
 ```bash

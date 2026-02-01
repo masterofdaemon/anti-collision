@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release)
+        run: |
+          cargo build --release --bin two-ip-ru
+          cargo build --release --bin two-ip-ru-gui
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/two-ip-ru.exe
+            target/release/two-ip-ru-gui.exe
+
