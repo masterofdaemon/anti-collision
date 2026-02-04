@@ -31,6 +31,8 @@ pub struct CycleResult {
     pub avg_mbps: f64,
 }
 
+pub const DEFAULT_TEST_URL: &str = "https://download.thinkbroadband.com/100MB.zip";
+
 async fn run_saturation_cycle(
     url: &str,
     duration: Option<Duration>,
@@ -43,15 +45,25 @@ async fn run_saturation_cycle(
     let mut workers = Vec::new();
 
     // Spawn workers
-    for _i in 0..config.streams {
+    for i in 0..config.streams {
         let tx = tx.clone();
         let client = client.clone();
         let url = url.to_string();
+        let log = log.clone();
         workers.push(tokio::spawn(async move {
+            let mut last_error_log = Instant::now() - Duration::from_secs(60);
             loop {
                 match client.get(&url).send().await {
                     Ok(resp) => {
                         if !resp.status().is_success() {
+                            if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
+                                let msg = format!(
+                                    "  WARN: target responded with HTTP {}",
+                                    resp.status()
+                                );
+                                log(&msg);
+                                last_error_log = Instant::now();
+                            }
                             sleep(Duration::from_secs(2)).await;
                             continue;
                         }
@@ -67,7 +79,12 @@ async fn run_saturation_cycle(
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
+                            let msg = format!("  WARN: request failed: {err}");
+                            log(&msg);
+                            last_error_log = Instant::now();
+                        }
                         sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -82,6 +99,8 @@ async fn run_saturation_cycle(
     let mut tick = interval(Duration::from_secs(1));
     let mut good_elapsed = Duration::from_secs(0);
     let mut samples: VecDeque<f64> = VecDeque::with_capacity(config.rolling_window_secs);
+    let mut zero_streak = Duration::from_secs(0);
+    let mut warned_zero = false;
 
     loop {
         tokio::select! {
@@ -100,6 +119,17 @@ async fn run_saturation_cycle(
                 if elapsed > 0.0 {
                     let last_mbps = (window_bytes as f64 * 8.0) / (1_000_000.0 * elapsed);
                     log(&format!("  Current: {:.2} Mbps", last_mbps));
+
+                    if window_bytes == 0 {
+                        zero_streak += Duration::from_secs_f64(elapsed);
+                        if !warned_zero && zero_streak >= Duration::from_secs(3) {
+                            log("  WARN: no data received yet; target may be blocked or down.");
+                            warned_zero = true;
+                        }
+                    } else {
+                        zero_streak = Duration::from_secs(0);
+                        warned_zero = false;
+                    }
 
                     samples.push_back(last_mbps);
                     if samples.len() > config.rolling_window_secs {

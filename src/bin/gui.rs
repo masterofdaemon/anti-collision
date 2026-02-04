@@ -10,7 +10,7 @@ use dioxus::launch;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use anti_collision::core::{run_monitor_loop, Config};
+use anti_collision::core::{run_monitor_loop, Config, DEFAULT_TEST_URL};
 
 #[derive(Clone)]
 struct WorkerHandle {
@@ -69,7 +69,7 @@ fn spawn_worker(url: String, threshold_mbps: f64) -> WorkerChannels {
 }
 
 fn App() -> Element {
-    let mut url = use_signal(|| "https://speed.cloudflare.com/__down?bytes=100000000".to_string());
+    let mut url = use_signal(|| DEFAULT_TEST_URL.to_string());
     let mut threshold = use_signal(|| 20.0_f64);
     let mut running = use_signal(|| false);
     let mut logs = use_signal(|| VecDeque::<String>::with_capacity(500));

@@ -13,7 +13,7 @@ Some internet connections (especially certain ISP configurations, long-range wir
 This tool implements an intelligent state machine to fix the connection *only when necessary*, avoiding wasted bandwidth.
 
 1.  **🔍 Monitoring (Check Phase)**
-    - Every cycle, the tool performs a **5-second sample download** from a high-speed target (Cloudflare CDN).
+    - Every cycle, the tool performs a **5-second sample download** from a high-speed target (ThinkBroadband).
     - It measures the real-time throughput.
 
 2.  **🧠 Decision Logic**
@@ -56,7 +56,7 @@ This repo includes a workflow at `.github/workflows/build.yml` that uploads:
 - `two-ip-ru-gui.exe`
 
 ### Customization
-By default, it targets Cloudflare's speed test file. You can override this by passing a URL as an argument:
+By default, it targets ThinkBroadband's speed test file. You can override this by passing a URL as an argument:
 ```bash
 ./target/release/two-ip-ru https://example.com/large-file.bin
 ```
