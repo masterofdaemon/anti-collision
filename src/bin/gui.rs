@@ -10,7 +10,14 @@ use dioxus::launch;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
-use anti_collision::core::{run_monitor_loop, Config, DEFAULT_TEST_URL};
+use anti_collision::core::{
+    build_candidate_urls,
+    run_monitor_loop,
+    select_available_url,
+    Config,
+    DEFAULT_TEST_URLS,
+    SelectionMode,
+};
 
 #[derive(Clone)]
 struct WorkerHandle {
@@ -22,7 +29,7 @@ struct WorkerChannels {
     worker: Option<WorkerHandle>,
 }
 
-fn spawn_worker(url: String, threshold_mbps: f64) -> WorkerChannels {
+fn spawn_worker(url: String, threshold_mbps: f64, streams: usize, mode: SelectionMode) -> WorkerChannels {
     let (log_tx, log_rx) = mpsc::channel::<String>();
     let (stop_tx, stop_rx) = watch::channel(false);
 
@@ -39,6 +46,7 @@ fn spawn_worker(url: String, threshold_mbps: f64) -> WorkerChannels {
             let client = match reqwest::Client::builder()
                 .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .tcp_keepalive(Duration::from_secs(60))
+                .http1_only()
                 .build()
             {
                 Ok(client) => client,
@@ -48,17 +56,22 @@ fn spawn_worker(url: String, threshold_mbps: f64) -> WorkerChannels {
                 }
             };
 
-            let config = Config {
-                threshold_mbps,
-                ..Config::default()
-            };
-
             let log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |msg: &str| {
                 let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
                 let _ = log_tx.send(format!("[{}] {}", ts, msg));
             });
 
-            run_monitor_loop(&url, &client, &config, stop_rx, log).await;
+            let config = Config {
+                threshold_mbps,
+                streams,
+                ..Config::default()
+            };
+
+            let prefer_first = !url.trim().is_empty();
+            let candidates = build_candidate_urls(Some(&url));
+            let selected = select_available_url(&candidates, prefer_first, mode, streams, &client, Some(log.clone())).await;
+
+            run_monitor_loop(&selected, &client, &config, stop_rx, log).await;
         });
     });
 
@@ -69,8 +82,10 @@ fn spawn_worker(url: String, threshold_mbps: f64) -> WorkerChannels {
 }
 
 fn App() -> Element {
-    let mut url = use_signal(|| DEFAULT_TEST_URL.to_string());
+    let mut url = use_signal(|| String::new());
     let mut threshold = use_signal(|| 20.0_f64);
+    let mut streams = use_signal(|| Config::default().streams);
+    let mut select_mode = use_signal(|| SelectionMode::Latency.as_str().to_string());
     let mut running = use_signal(|| false);
     let mut logs = use_signal(|| VecDeque::<String>::with_capacity(500));
 
@@ -110,6 +125,8 @@ fn App() -> Element {
         let mut running = running.clone();
         let worker = worker.clone();
         let mut logs = logs.clone();
+        let mut streams = streams.clone();
+        let mut select_mode = select_mode.clone();
         move |_| {
             if running() {
                 return;
@@ -120,7 +137,8 @@ fn App() -> Element {
                 l.push_back("[ui] starting...".to_string());
             });
 
-            let chans = spawn_worker(url(), threshold());
+            let mode = SelectionMode::from_str(&select_mode());
+            let chans = spawn_worker(url(), threshold(), streams(), mode);
             let worker = worker();
             *worker.lock().unwrap() = chans;
             running.set(true);
@@ -154,11 +172,15 @@ fn App() -> Element {
             p { style: "margin: 0 0 16px 0; color: #444;", "Dioxus desktop UI (no tray)" }
 
             div { style: "display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin-bottom: 12px;",
-                label { "Target URL" }
-                input {
+                label { "Target Server" }
+                select {
                     value: "{url}",
                     oninput: move |evt| url.set(evt.value()),
-                    style: "width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 8px;",
+                    style: "width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff;",
+                    option { value: "", "Auto (best available)" }
+                    for entry in DEFAULT_TEST_URLS.iter() {
+                        option { value: "{entry}", "{entry}" }
+                    }
                 }
 
                 label { "Threshold" }
@@ -170,6 +192,27 @@ fn App() -> Element {
                         }
                     },
                     style: "width: 140px; padding: 8px; border: 1px solid #ccc; border-radius: 8px;",
+                }
+
+                label { "Streams" }
+                input {
+                    value: "{streams}",
+                    oninput: move |evt| {
+                        if let Ok(v) = evt.value().parse::<usize>() {
+                            let v = v.clamp(1, 64);
+                            streams.set(v);
+                        }
+                    },
+                    style: "width: 140px; padding: 8px; border: 1px solid #ccc; border-radius: 8px;",
+                }
+
+                label { "Auto Mode" }
+                select {
+                    value: "{select_mode}",
+                    oninput: move |evt| select_mode.set(evt.value()),
+                    style: "width: 220px; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff;",
+                    option { value: "latency", "Latency (recommended)" }
+                    option { value: "throughput", "Throughput (fastest)" }
                 }
             }
 

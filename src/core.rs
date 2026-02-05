@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep};
-use futures_util::StreamExt;
+use tokio::time::{interval, sleep, timeout};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio::sync::watch;
 use std::sync::Arc;
+use reqwest::header::RANGE;
 
 #[derive(Clone)]
 pub struct Config {
@@ -31,7 +32,221 @@ pub struct CycleResult {
     pub avg_mbps: f64,
 }
 
-pub const DEFAULT_TEST_URL: &str = "https://download.thinkbroadband.com/100MB.zip";
+pub const DEFAULT_TEST_URL: &str = "https://speedtest.selectel.ru/100MB";
+pub const DEFAULT_TEST_URLS: &[&str] = &[
+    "https://speedtest.selectel.ru/100MB",
+    "https://fsn1-speed.hetzner.com/100MB.bin",
+    "https://hel1-speed.hetzner.com/100MB.bin",
+    "https://ash-speed.hetzner.com/100MB.bin",
+    "https://hil-speed.hetzner.com/100MB.bin",
+    "https://speed.af.de/files/100MB.bin",
+    "https://us.speedtest.hostiserver.com/100MB",
+    "https://eu.speedtest.hostiserver.com/100MB",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionMode {
+    Latency,
+    Throughput,
+}
+
+impl SelectionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SelectionMode::Latency => "latency",
+            SelectionMode::Throughput => "throughput",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "throughput" => SelectionMode::Throughput,
+            _ => SelectionMode::Latency,
+        }
+    }
+}
+
+pub fn build_candidate_urls(preferred: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(url) = preferred {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    for &url in DEFAULT_TEST_URLS {
+        if !out.iter().any(|u| u == url) {
+            out.push(url.to_string());
+        }
+    }
+    out
+}
+
+fn log_opt(log: &Option<Arc<dyn Fn(&str) + Send + Sync>>, msg: &str) {
+    if let Some(log) = log {
+        log(msg);
+    }
+}
+
+async fn probe_latency(url: &str, client: &reqwest::Client) -> Result<Duration, String> {
+    let start = Instant::now();
+    let req = client.get(url).header(RANGE, "bytes=0-0");
+    let resp = timeout(Duration::from_secs(5), req.send())
+        .await
+        .map_err(|_| "timeout".to_string())?
+        .map_err(|err| err.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let mut stream = resp.bytes_stream();
+    let first = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .map_err(|_| "timeout".to_string())?;
+    match first {
+        Some(Ok(bytes)) if !bytes.is_empty() => Ok(start.elapsed()),
+        Some(Ok(_)) => Ok(start.elapsed()),
+        Some(Err(err)) => Err(err.to_string()),
+        None => Err("no data".to_string()),
+    }
+}
+
+async fn select_best_latency(
+    urls: &[String],
+    client: &reqwest::Client,
+    log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+) -> Option<(String, Duration)> {
+    let mut tasks = FuturesUnordered::new();
+    for url in urls {
+        let url = url.clone();
+        let client = client.clone();
+        tasks.push(async move { (url.clone(), probe_latency(&url, &client).await) });
+    }
+
+    let mut best: Option<(String, Duration)> = None;
+    while let Some((url, result)) = tasks.next().await {
+        match result {
+            Ok(latency) => {
+                log_opt(&log, &format!("  SELECT: {url} ok ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                let replace = match best {
+                    None => true,
+                    Some((_, best_latency)) => latency < best_latency,
+                };
+                if replace {
+                    best = Some((url, latency));
+                }
+            }
+            Err(err) => {
+                log_opt(&log, &format!("  WARN: probe failed for {url}: {err}"));
+            }
+        }
+    }
+
+    best
+}
+
+async fn probe_throughput(
+    url: &str,
+    client: &reqwest::Client,
+    streams: usize,
+) -> Result<f64, String> {
+    let probe_streams = streams.max(1).min(16);
+    let config = Config {
+        streams: probe_streams,
+        ..Config::default()
+    };
+    let (_stop_tx, mut stop_rx) = watch::channel(false);
+    let silent_log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|_| {});
+    let duration = Duration::from_secs(3);
+
+    let result = run_saturation_cycle(url, Some(duration), client, &config, &mut stop_rx, silent_log).await;
+    Ok(result.avg_mbps)
+}
+
+async fn select_best_throughput(
+    urls: &[String],
+    client: &reqwest::Client,
+    log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    streams: usize,
+) -> Option<(String, f64)> {
+    let mut best: Option<(String, f64)> = None;
+    for url in urls {
+        log_opt(&log, &format!("  SELECT: testing throughput for {url} (3s)..."));
+        match probe_throughput(url, client, streams).await {
+            Ok(mbps) => {
+                log_opt(&log, &format!("  SELECT: {url} ok ({:.2} Mbps)", mbps));
+                let replace = match best {
+                    None => true,
+                    Some((_, best_mbps)) => mbps > best_mbps,
+                };
+                if replace {
+                    best = Some((url.clone(), mbps));
+                }
+            }
+            Err(err) => {
+                log_opt(&log, &format!("  WARN: throughput probe failed for {url}: {err}"));
+            }
+        }
+    }
+
+    best
+}
+
+pub async fn select_available_url(
+    candidates: &[String],
+    prefer_first: bool,
+    mode: SelectionMode,
+    probe_streams: usize,
+    client: &reqwest::Client,
+    log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+) -> String {
+    if candidates.is_empty() {
+        return DEFAULT_TEST_URL.to_string();
+    }
+
+    if prefer_first {
+        let first = &candidates[0];
+        log_opt(&log, &format!("SELECT: checking preferred target {first}..."));
+        match probe_latency(first, client).await {
+            Ok(latency) => {
+                log_opt(&log, &format!("SELECT: using {first} ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                return first.clone();
+            }
+            Err(err) => {
+                log_opt(&log, &format!("  WARN: preferred target failed: {err}"));
+            }
+        }
+    }
+
+    let pool = if prefer_first && candidates.len() > 1 {
+        &candidates[1..]
+    } else {
+        candidates
+    };
+
+    if !pool.is_empty() {
+        match mode {
+            SelectionMode::Latency => {
+                log_opt(&log, &format!("SELECT: probing {} targets for lowest latency...", pool.len()));
+                if let Some((url, latency)) = select_best_latency(pool, client, log.clone()).await {
+                    log_opt(&log, &format!("SELECT: using {url} ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                    return url;
+                }
+            }
+            SelectionMode::Throughput => {
+                log_opt(&log, &format!("SELECT: probing {} targets for highest throughput...", pool.len()));
+                if let Some((url, mbps)) = select_best_throughput(pool, client, log.clone(), probe_streams).await {
+                    log_opt(&log, &format!("SELECT: using {url} ({:.2} Mbps)", mbps));
+                    return url;
+                }
+            }
+        }
+    }
+
+    log_opt(&log, "WARN: no targets reachable; using first candidate anyway.");
+    candidates[0].clone()
+}
 
 async fn run_saturation_cycle(
     url: &str,
@@ -187,6 +402,7 @@ pub async fn run_monitor_loop(
 ) {
     log("=== Automated Anti-Collision Saturator ===");
     log(&format!("Threshold: {} Mbps", config.threshold_mbps));
+    log(&format!("Streams:   {}", config.streams));
     log(&format!("Target:    {}", url));
     log("Execution: Monitoring -> [Saturation] -> 1h Sleep");
     log("------------------------------------------");
