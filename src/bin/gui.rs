@@ -37,7 +37,7 @@ fn spawn_worker(url: String, threshold_mbps: f64, streams: usize, mode: Selectio
         let rt = match Runtime::new() {
             Ok(rt) => rt,
             Err(err) => {
-                let _ = log_tx.send(format!("ERR: Failed to create Tokio runtime: {err}"));
+                let _ = log_tx.send(format!("ОШИБКА: не удалось создать Tokio runtime: {err}"));
                 return;
             }
         };
@@ -51,7 +51,7 @@ fn spawn_worker(url: String, threshold_mbps: f64, streams: usize, mode: Selectio
             {
                 Ok(client) => client,
                 Err(err) => {
-                    let _ = log_tx.send(format!("ERR: Failed to build HTTP client: {err}"));
+                    let _ = log_tx.send(format!("ОШИБКА: не удалось создать HTTP-клиент: {err}"));
                     return;
                 }
             };
@@ -134,7 +134,7 @@ fn App() -> Element {
 
             logs.with_mut(|l| {
                 l.clear();
-                l.push_back("[ui] starting...".to_string());
+                l.push_back("[интерфейс] запуск...".to_string());
             });
 
             let mode = SelectionMode::from_str(&select_mode());
@@ -158,7 +158,7 @@ fn App() -> Element {
                 }
             }
             logs.with_mut(|l| {
-                l.push_back("[ui] stop requested".to_string());
+                l.push_back("[интерфейс] запрошена остановка".to_string());
             });
             running.set(false);
         }
@@ -168,22 +168,22 @@ fn App() -> Element {
         div {
             style: "font-family: ui-sans-serif, system-ui; padding: 16px; max-width: 900px;",
 
-            h1 { style: "margin: 0 0 8px 0;", "Anti-Collision Saturator" }
-            p { style: "margin: 0 0 16px 0; color: #444;", "Dioxus desktop UI (no tray)" }
+            h1 { style: "margin: 0 0 8px 0;", "Насыщатор Anti-Collision" }
+            p { style: "margin: 0 0 16px 0; color: #444;", "Настольный интерфейс Dioxus (без трея)" }
 
             div { style: "display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin-bottom: 12px;",
-                label { "Target Server" }
+                label { "Сервер" }
                 select {
                     value: "{url}",
                     oninput: move |evt| url.set(evt.value()),
                     style: "width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff;",
-                    option { value: "", "Auto (best available)" }
+                    option { value: "", "Авто (лучший доступный)" }
                     for entry in DEFAULT_TEST_URLS.iter() {
                         option { value: "{entry}", "{entry}" }
                     }
                 }
 
-                label { "Threshold" }
+                label { "Порог" }
                 input {
                     value: "{threshold}",
                     oninput: move |evt| {
@@ -194,7 +194,7 @@ fn App() -> Element {
                     style: "width: 140px; padding: 8px; border: 1px solid #ccc; border-radius: 8px;",
                 }
 
-                label { "Streams" }
+                label { "Потоки" }
                 input {
                     value: "{streams}",
                     oninput: move |evt| {
@@ -206,13 +206,13 @@ fn App() -> Element {
                     style: "width: 140px; padding: 8px; border: 1px solid #ccc; border-radius: 8px;",
                 }
 
-                label { "Auto Mode" }
+                label { "Режим выбора" }
                 select {
                     value: "{select_mode}",
                     oninput: move |evt| select_mode.set(evt.value()),
                     style: "width: 220px; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff;",
-                    option { value: "latency", "Latency (recommended)" }
-                    option { value: "throughput", "Throughput (fastest)" }
+                    option { value: "latency", "По задержке (рекомендуется)" }
+                    option { value: "throughput", "По скорости (самый быстрый)" }
                 }
             }
 
@@ -221,17 +221,17 @@ fn App() -> Element {
                     onclick: on_start,
                     disabled: running(),
                     style: "padding: 8px 12px; border-radius: 10px; border: 1px solid #1a73e8; background: #1a73e8; color: white;",
-                    "Start"
+                    "Запустить"
                 }
                 button {
                     onclick: on_stop,
                     disabled: !running(),
                     style: "padding: 8px 12px; border-radius: 10px; border: 1px solid #aaa; background: #f5f5f5;",
-                    "Stop"
+                    "Остановить"
                 }
                 div { style: "margin-left: auto; padding: 8px 10px; border-radius: 10px; background: #f2f7ff; border: 1px solid #d6e6ff;",
-                    strong { "Status: " }
-                    span { { if running() { "Running" } else { "Stopped" } } }
+                    strong { "Статус: " }
+                    span { { if running() { "Работает" } else { "Остановлено" } } }
                 }
             }
 

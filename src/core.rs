@@ -60,7 +60,7 @@ impl SelectionMode {
 
     pub fn from_str(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
-            "throughput" => SelectionMode::Throughput,
+            "throughput" | "пропускная способность" | "скорость" => SelectionMode::Throughput,
             _ => SelectionMode::Latency,
         }
     }
@@ -93,22 +93,22 @@ async fn probe_latency(url: &str, client: &reqwest::Client) -> Result<Duration, 
     let req = client.get(url).header(RANGE, "bytes=0-0");
     let resp = timeout(Duration::from_secs(5), req.send())
         .await
-        .map_err(|_| "timeout".to_string())?
+        .map_err(|_| "тайм-аут".to_string())?
         .map_err(|err| err.to_string())?;
 
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(format!("код HTTP {}", resp.status()));
     }
 
     let mut stream = resp.bytes_stream();
     let first = timeout(Duration::from_secs(5), stream.next())
         .await
-        .map_err(|_| "timeout".to_string())?;
+        .map_err(|_| "тайм-аут".to_string())?;
     match first {
         Some(Ok(bytes)) if !bytes.is_empty() => Ok(start.elapsed()),
         Some(Ok(_)) => Ok(start.elapsed()),
         Some(Err(err)) => Err(err.to_string()),
-        None => Err("no data".to_string()),
+        None => Err("нет данных".to_string()),
     }
 }
 
@@ -128,7 +128,7 @@ async fn select_best_latency(
     while let Some((url, result)) = tasks.next().await {
         match result {
             Ok(latency) => {
-                log_opt(&log, &format!("  SELECT: {url} ok ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                log_opt(&log, &format!("  ВЫБОР: {url} доступен ({:.0} мс)", latency.as_secs_f64() * 1000.0));
                 let replace = match best {
                     None => true,
                     Some((_, best_latency)) => latency < best_latency,
@@ -138,7 +138,7 @@ async fn select_best_latency(
                 }
             }
             Err(err) => {
-                log_opt(&log, &format!("  WARN: probe failed for {url}: {err}"));
+                log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: проверка не удалась для {url}: {err}"));
             }
         }
     }
@@ -172,10 +172,10 @@ async fn select_best_throughput(
 ) -> Option<(String, f64)> {
     let mut best: Option<(String, f64)> = None;
     for url in urls {
-        log_opt(&log, &format!("  SELECT: testing throughput for {url} (3s)..."));
+        log_opt(&log, &format!("  ВЫБОР: проверяем пропускную способность {url} (3 c)..."));
         match probe_throughput(url, client, streams).await {
             Ok(mbps) => {
-                log_opt(&log, &format!("  SELECT: {url} ok ({:.2} Mbps)", mbps));
+                log_opt(&log, &format!("  ВЫБОР: {url} доступен ({:.2} Мбит/с)", mbps));
                 let replace = match best {
                     None => true,
                     Some((_, best_mbps)) => mbps > best_mbps,
@@ -185,7 +185,7 @@ async fn select_best_throughput(
                 }
             }
             Err(err) => {
-                log_opt(&log, &format!("  WARN: throughput probe failed for {url}: {err}"));
+                log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: проверка пропускной способности не удалась для {url}: {err}"));
             }
         }
     }
@@ -207,14 +207,14 @@ pub async fn select_available_url(
 
     if prefer_first {
         let first = &candidates[0];
-        log_opt(&log, &format!("SELECT: checking preferred target {first}..."));
+        log_opt(&log, &format!("ВЫБОР: проверяем предпочтительный адрес {first}..."));
         match probe_latency(first, client).await {
             Ok(latency) => {
-                log_opt(&log, &format!("SELECT: using {first} ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                log_opt(&log, &format!("ВЫБОР: используем {first} ({:.0} мс)", latency.as_secs_f64() * 1000.0));
                 return first.clone();
             }
             Err(err) => {
-                log_opt(&log, &format!("  WARN: preferred target failed: {err}"));
+                log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: предпочтительный адрес недоступен: {err}"));
             }
         }
     }
@@ -228,23 +228,23 @@ pub async fn select_available_url(
     if !pool.is_empty() {
         match mode {
             SelectionMode::Latency => {
-                log_opt(&log, &format!("SELECT: probing {} targets for lowest latency...", pool.len()));
+                log_opt(&log, &format!("ВЫБОР: проверяем {} адресов с минимальной задержкой...", pool.len()));
                 if let Some((url, latency)) = select_best_latency(pool, client, log.clone()).await {
-                    log_opt(&log, &format!("SELECT: using {url} ({:.0} ms)", latency.as_secs_f64() * 1000.0));
+                    log_opt(&log, &format!("ВЫБОР: используем {url} ({:.0} мс)", latency.as_secs_f64() * 1000.0));
                     return url;
                 }
             }
             SelectionMode::Throughput => {
-                log_opt(&log, &format!("SELECT: probing {} targets for highest throughput...", pool.len()));
+                log_opt(&log, &format!("ВЫБОР: проверяем {} адресов с максимальной скоростью...", pool.len()));
                 if let Some((url, mbps)) = select_best_throughput(pool, client, log.clone(), probe_streams).await {
-                    log_opt(&log, &format!("SELECT: using {url} ({:.2} Mbps)", mbps));
+                    log_opt(&log, &format!("ВЫБОР: используем {url} ({:.2} Мбит/с)", mbps));
                     return url;
                 }
             }
         }
     }
 
-    log_opt(&log, "WARN: no targets reachable; using first candidate anyway.");
+    log_opt(&log, "ПРЕДУПРЕЖДЕНИЕ: ни один адрес не доступен, используем первый из списка.");
     candidates[0].clone()
 }
 
@@ -273,7 +273,7 @@ async fn run_saturation_cycle(
                         if !resp.status().is_success() {
                             if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
                                 let msg = format!(
-                                    "  WARN: target responded with HTTP {}",
+                                    "  ПРЕДУПРЕЖДЕНИЕ: сервер вернул HTTP {}",
                                     resp.status()
                                 );
                                 log(&msg);
@@ -296,7 +296,7 @@ async fn run_saturation_cycle(
                     }
                     Err(err) => {
                         if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
-                            let msg = format!("  WARN: request failed: {err}");
+                            let msg = format!("  ПРЕДУПРЕЖДЕНИЕ: запрос завершился ошибкой: {err}");
                             log(&msg);
                             last_error_log = Instant::now();
                         }
@@ -333,12 +333,12 @@ async fn run_saturation_cycle(
                 let elapsed = last_report.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
                     let last_mbps = (window_bytes as f64 * 8.0) / (1_000_000.0 * elapsed);
-                    log(&format!("  Current: {:.2} Mbps", last_mbps));
+                    log(&format!("  Текущая скорость: {:.2} Мбит/с", last_mbps));
 
                     if window_bytes == 0 {
                         zero_streak += Duration::from_secs_f64(elapsed);
                         if !warned_zero && zero_streak >= Duration::from_secs(3) {
-                            log("  WARN: no data received yet; target may be blocked or down.");
+                            log("  ПРЕДУПРЕЖДЕНИЕ: пока нет данных; адрес может быть заблокирован или недоступен.");
                             warned_zero = true;
                         }
                     } else {
@@ -374,7 +374,7 @@ async fn run_saturation_cycle(
                             good_elapsed = Duration::from_secs(0);
                         }
                         if good_elapsed >= Duration::from_secs(15) {
-                            log(&format!("  Speed restored to {:.2} Mbps.", last_mbps));
+                            log(&format!("  Скорость восстановилась до {:.2} Мбит/с.", last_mbps));
                             for w in workers { w.abort(); }
                             return CycleResult { avg_mbps: last_mbps };
                         }
@@ -400,11 +400,11 @@ pub async fn run_monitor_loop(
     mut stop_rx: watch::Receiver<bool>,
     log: Arc<dyn Fn(&str) + Send + Sync>,
 ) {
-    log("=== Automated Anti-Collision Saturator ===");
-    log(&format!("Threshold: {} Mbps", config.threshold_mbps));
-    log(&format!("Streams:   {}", config.streams));
-    log(&format!("Target:    {}", url));
-    log("Execution: Monitoring -> [Saturation] -> 1h Sleep");
+    log("=== Автоматический насыщатор Anti-Collision ===");
+    log(&format!("Порог: {} Мбит/с", config.threshold_mbps));
+    log(&format!("Потоки: {}", config.streams));
+    log(&format!("Адрес: {}", url));
+    log("Режим: Мониторинг -> [Насыщение] -> Сон 1 час");
     log("------------------------------------------");
 
     loop {
@@ -412,7 +412,7 @@ pub async fn run_monitor_loop(
             break;
         }
         log(&format!(
-            "CHECKING: Measuring current speed ({}s sample)...",
+            "ПРОВЕРКА: измеряем текущую скорость (окно {} c)...",
             config.check_duration.as_secs()
         ));
         let result = run_saturation_cycle(
@@ -431,7 +431,7 @@ pub async fn run_monitor_loop(
 
         if result.avg_mbps >= config.threshold_mbps {
             log(&format!(
-                "OK: Speed is {:.2} Mbps. Sleeping for 1 hour...",
+                "НОРМА: скорость {:.2} Мбит/с. Уходим в сон на 1 час...",
                 result.avg_mbps
             ));
             tokio::select! {
@@ -442,14 +442,14 @@ pub async fn run_monitor_loop(
             }
         } else {
             log(&format!(
-                "POOR: Speed is {:.2} Mbps. Starting continuous saturation...",
+                "НИЗКАЯ СКОРОСТЬ: {:.2} Мбит/с. Запускаем непрерывное насыщение...",
                 result.avg_mbps
             ));
             run_saturation_cycle(url, None, client, config, &mut stop_rx, log.clone()).await;
             if *stop_rx.borrow() {
                 break;
             }
-            log("RECOVERED: Speed back to normal. Entering 1-hour sleep cycle.");
+            log("ВОССТАНОВЛЕНО: скорость вернулась к норме. Переходим в цикл сна на 1 час.");
             tokio::select! {
                 _ = sleep(config.sleep_duration) => {}
                 _ = stop_rx.changed() => {
