@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logger: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(log);
     let preferred = args.get(1).map(|s| s.as_str());
     let candidates = build_candidate_urls(preferred.or(Some(DEFAULT_TEST_URL)));
-    let selected = select_available_url(
+    let selection = select_available_url(
         &candidates,
         preferred.is_some(),
         SelectionMode::Latency,
@@ -40,6 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(logger.clone()),
     )
     .await;
-    run_monitor_loop(&selected, &client, &config, stop_rx, logger).await;
+    run_monitor_loop(&selection.rotation_targets, &client, &config, stop_rx, logger).await;
     Ok(())
 }

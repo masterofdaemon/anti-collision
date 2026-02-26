@@ -19,10 +19,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            threshold_mbps: 20.0,
+            threshold_mbps: 60.0,
             sleep_duration: Duration::from_secs(3600),
             check_duration: Duration::from_secs(5),
-            streams: 4,
+            streams: 8,
             rolling_window_secs: 5,
         }
     }
@@ -30,6 +30,11 @@ impl Default for Config {
 
 pub struct CycleResult {
     pub avg_mbps: f64,
+}
+
+pub struct SelectionResult {
+    pub selected: String,
+    pub rotation_targets: Vec<String>,
 }
 
 pub const DEFAULT_TEST_URL: &str = "https://speedtest.selectel.ru/100MB";
@@ -116,7 +121,7 @@ async fn select_best_latency(
     urls: &[String],
     client: &reqwest::Client,
     log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-) -> Option<(String, Duration)> {
+) -> Vec<(String, Duration)> {
     let mut tasks = FuturesUnordered::new();
     for url in urls {
         let url = url.clone();
@@ -124,18 +129,12 @@ async fn select_best_latency(
         tasks.push(async move { (url.clone(), probe_latency(&url, &client).await) });
     }
 
-    let mut best: Option<(String, Duration)> = None;
+    let mut successful: Vec<(String, Duration)> = Vec::new();
     while let Some((url, result)) = tasks.next().await {
         match result {
             Ok(latency) => {
                 log_opt(&log, &format!("  ВЫБОР: {url} доступен ({:.0} мс)", latency.as_secs_f64() * 1000.0));
-                let replace = match best {
-                    None => true,
-                    Some((_, best_latency)) => latency < best_latency,
-                };
-                if replace {
-                    best = Some((url, latency));
-                }
+                successful.push((url, latency));
             }
             Err(err) => {
                 log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: проверка не удалась для {url}: {err}"));
@@ -143,7 +142,8 @@ async fn select_best_latency(
         }
     }
 
-    best
+    successful.sort_by(|a, b| a.1.cmp(&b.1));
+    successful
 }
 
 async fn probe_throughput(
@@ -159,8 +159,8 @@ async fn probe_throughput(
     let (_stop_tx, mut stop_rx) = watch::channel(false);
     let silent_log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|_| {});
     let duration = Duration::from_secs(3);
-
-    let result = run_saturation_cycle(url, Some(duration), client, &config, &mut stop_rx, silent_log).await;
+    let targets = vec![url.to_string()];
+    let result = run_saturation_cycle(&targets, Some(duration), client, &config, &mut stop_rx, silent_log).await;
     Ok(result.avg_mbps)
 }
 
@@ -169,20 +169,14 @@ async fn select_best_throughput(
     client: &reqwest::Client,
     log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     streams: usize,
-) -> Option<(String, f64)> {
-    let mut best: Option<(String, f64)> = None;
+) -> Vec<(String, f64)> {
+    let mut successful: Vec<(String, f64)> = Vec::new();
     for url in urls {
         log_opt(&log, &format!("  ВЫБОР: проверяем пропускную способность {url} (3 c)..."));
         match probe_throughput(url, client, streams).await {
             Ok(mbps) => {
                 log_opt(&log, &format!("  ВЫБОР: {url} доступен ({:.2} Мбит/с)", mbps));
-                let replace = match best {
-                    None => true,
-                    Some((_, best_mbps)) => mbps > best_mbps,
-                };
-                if replace {
-                    best = Some((url.clone(), mbps));
-                }
+                successful.push((url.clone(), mbps));
             }
             Err(err) => {
                 log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: проверка пропускной способности не удалась для {url}: {err}"));
@@ -190,7 +184,8 @@ async fn select_best_throughput(
         }
     }
 
-    best
+    successful.sort_by(|a, b| b.1.total_cmp(&a.1));
+    successful
 }
 
 pub async fn select_available_url(
@@ -200,10 +195,17 @@ pub async fn select_available_url(
     probe_streams: usize,
     client: &reqwest::Client,
     log: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-) -> String {
+) -> SelectionResult {
     if candidates.is_empty() {
-        return DEFAULT_TEST_URL.to_string();
+        let fallback = DEFAULT_TEST_URL.to_string();
+        return SelectionResult {
+            selected: fallback.clone(),
+            rotation_targets: vec![fallback],
+        };
     }
+
+    let mut selected: Option<String> = None;
+    let mut rotation_targets: Vec<String> = Vec::new();
 
     if prefer_first {
         let first = &candidates[0];
@@ -211,7 +213,8 @@ pub async fn select_available_url(
         match probe_latency(first, client).await {
             Ok(latency) => {
                 log_opt(&log, &format!("ВЫБОР: используем {first} ({:.0} мс)", latency.as_secs_f64() * 1000.0));
-                return first.clone();
+                selected = Some(first.clone());
+                rotation_targets.push(first.clone());
             }
             Err(err) => {
                 log_opt(&log, &format!("  ПРЕДУПРЕЖДЕНИЕ: предпочтительный адрес недоступен: {err}"));
@@ -229,27 +232,71 @@ pub async fn select_available_url(
         match mode {
             SelectionMode::Latency => {
                 log_opt(&log, &format!("ВЫБОР: проверяем {} адресов с минимальной задержкой...", pool.len()));
-                if let Some((url, latency)) = select_best_latency(pool, client, log.clone()).await {
-                    log_opt(&log, &format!("ВЫБОР: используем {url} ({:.0} мс)", latency.as_secs_f64() * 1000.0));
-                    return url;
+                let ranked = select_best_latency(pool, client, log.clone()).await;
+                if selected.is_none() {
+                    if let Some((url, latency)) = ranked.first() {
+                        let url = url.clone();
+                        let latency = *latency;
+                        log_opt(&log, &format!("ВЫБОР: используем {url} ({:.0} мс)", latency.as_secs_f64() * 1000.0));
+                        selected = Some(url);
+                    }
+                }
+                for (url, _) in ranked {
+                    if !rotation_targets.iter().any(|u| u == &url) {
+                        rotation_targets.push(url);
+                    }
                 }
             }
             SelectionMode::Throughput => {
                 log_opt(&log, &format!("ВЫБОР: проверяем {} адресов с максимальной скоростью...", pool.len()));
-                if let Some((url, mbps)) = select_best_throughput(pool, client, log.clone(), probe_streams).await {
-                    log_opt(&log, &format!("ВЫБОР: используем {url} ({:.2} Мбит/с)", mbps));
-                    return url;
+                let ranked = select_best_throughput(pool, client, log.clone(), probe_streams).await;
+                if selected.is_none() {
+                    if let Some((url, mbps)) = ranked.first() {
+                        let url = url.clone();
+                        let mbps = *mbps;
+                        log_opt(&log, &format!("ВЫБОР: используем {url} ({:.2} Мбит/с)", mbps));
+                        selected = Some(url);
+                    }
+                }
+                for (url, _) in ranked {
+                    if !rotation_targets.iter().any(|u| u == &url) {
+                        rotation_targets.push(url);
+                    }
                 }
             }
         }
     }
 
-    log_opt(&log, "ПРЕДУПРЕЖДЕНИЕ: ни один адрес не доступен, используем первый из списка.");
-    candidates[0].clone()
+    if selected.is_none() {
+        log_opt(&log, "ПРЕДУПРЕЖДЕНИЕ: ни один адрес не доступен, используем первый из списка.");
+        selected = Some(candidates[0].clone());
+    }
+    let selected = selected.unwrap_or_else(|| candidates[0].clone());
+    if !rotation_targets.iter().any(|u| u == &selected) {
+        rotation_targets.insert(0, selected.clone());
+    }
+    if rotation_targets.is_empty() {
+        rotation_targets.push(selected.clone());
+    }
+    if rotation_targets.len() > 1 {
+        log_opt(&log, &format!("ВЫБОР: ротация активна, источников: {}", rotation_targets.len()));
+    } else {
+        log_opt(&log, "ВЫБОР: доступен только один источник, ротация ограничена.");
+    }
+
+    SelectionResult {
+        selected,
+        rotation_targets,
+    }
+}
+
+fn with_cache_buster(url: &str, worker: usize, seq: u64) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}ac_worker={worker}&ac_seq={seq}")
 }
 
 async fn run_saturation_cycle(
-    url: &str,
+    targets: &[String],
     duration: Option<Duration>,
     client: &reqwest::Client,
     config: &Config,
@@ -258,22 +305,38 @@ async fn run_saturation_cycle(
 ) -> CycleResult {
     let (tx, mut rx) = mpsc::channel(1024);
     let mut workers = Vec::new();
+    let targets = if targets.is_empty() {
+        vec![DEFAULT_TEST_URL.to_string()]
+    } else {
+        targets.to_vec()
+    };
+    if targets.len() > 1 {
+        log(&format!("  РОТАЦИЯ: используем {} источников загрузки.", targets.len()));
+    }
+    let targets = Arc::new(targets);
 
     // Spawn workers
     for i in 0..config.streams {
         let tx = tx.clone();
         let client = client.clone();
-        let url = url.to_string();
+        let targets = targets.clone();
         let log = log.clone();
         workers.push(tokio::spawn(async move {
             let mut last_error_log = Instant::now() - Duration::from_secs(60);
+            let mut target_idx = i % targets.len();
+            let mut request_seq: u64 = 0;
             loop {
-                match client.get(&url).send().await {
+                let base_url = targets[target_idx].clone();
+                target_idx = (target_idx + 1) % targets.len();
+                let request_url = with_cache_buster(&base_url, i, request_seq);
+                request_seq = request_seq.wrapping_add(1);
+
+                match client.get(&request_url).send().await {
                     Ok(resp) => {
                         if !resp.status().is_success() {
                             if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
                                 let msg = format!(
-                                    "  ПРЕДУПРЕЖДЕНИЕ: сервер вернул HTTP {}",
+                                    "  ПРЕДУПРЕЖДЕНИЕ: сервер {base_url} вернул HTTP {}",
                                     resp.status()
                                 );
                                 log(&msg);
@@ -296,7 +359,7 @@ async fn run_saturation_cycle(
                     }
                     Err(err) => {
                         if i == 0 && last_error_log.elapsed() >= Duration::from_secs(5) {
-                            let msg = format!("  ПРЕДУПРЕЖДЕНИЕ: запрос завершился ошибкой: {err}");
+                            let msg = format!("  ПРЕДУПРЕЖДЕНИЕ: запрос к {base_url} завершился ошибкой: {err}");
                             log(&msg);
                             last_error_log = Instant::now();
                         }
@@ -394,17 +457,34 @@ async fn run_saturation_cycle(
 }
 
 pub async fn run_monitor_loop(
-    url: &str,
+    targets: &[String],
     client: &reqwest::Client,
     config: &Config,
     mut stop_rx: watch::Receiver<bool>,
     log: Arc<dyn Fn(&str) + Send + Sync>,
 ) {
+    let primary_target = targets
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_TEST_URL.to_string());
+    let check_targets = vec![primary_target.clone()];
+    let saturation_targets = if targets.is_empty() {
+        vec![primary_target.clone()]
+    } else {
+        targets.to_vec()
+    };
+
     log("=== Автоматический насыщатор Anti-Collision ===");
     log(&format!("Порог: {} Мбит/с", config.threshold_mbps));
     log(&format!("Потоки: {}", config.streams));
-    log(&format!("Адрес: {}", url));
+    log(&format!("Адрес (основной): {}", primary_target));
+    if saturation_targets.len() > 1 {
+        log(&format!("Ротация источников: {} адресов", saturation_targets.len()));
+    }
     log("Режим: Мониторинг -> [Насыщение] -> Сон 1 час");
+    if cfg!(target_os = "android") {
+        log("ANDROID: в фоне система может выгрузить приложение. Если через час нет новой проверки — откройте приложение и нажмите «Запустить».");
+    }
     log("------------------------------------------");
 
     loop {
@@ -416,7 +496,7 @@ pub async fn run_monitor_loop(
             config.check_duration.as_secs()
         ));
         let result = run_saturation_cycle(
-            url,
+            &check_targets,
             Some(config.check_duration),
             client,
             config,
@@ -434,6 +514,9 @@ pub async fn run_monitor_loop(
                 "НОРМА: скорость {:.2} Мбит/с. Уходим в сон на 1 час...",
                 result.avg_mbps
             ));
+            if cfg!(target_os = "android") {
+                log("ANDROID: напоминание — через 1 час начнется новая проверка, только если приложение не выгружено из фона.");
+            }
             tokio::select! {
                 _ = sleep(config.sleep_duration) => {}
                 _ = stop_rx.changed() => {
@@ -445,11 +528,14 @@ pub async fn run_monitor_loop(
                 "НИЗКАЯ СКОРОСТЬ: {:.2} Мбит/с. Запускаем непрерывное насыщение...",
                 result.avg_mbps
             ));
-            run_saturation_cycle(url, None, client, config, &mut stop_rx, log.clone()).await;
+            run_saturation_cycle(&saturation_targets, None, client, config, &mut stop_rx, log.clone()).await;
             if *stop_rx.borrow() {
                 break;
             }
             log("ВОССТАНОВЛЕНО: скорость вернулась к норме. Переходим в цикл сна на 1 час.");
+            if cfg!(target_os = "android") {
+                log("ANDROID: напоминание — если система остановит приложение в фоне, откройте его и нажмите «Запустить».");
+            }
             tokio::select! {
                 _ = sleep(config.sleep_duration) => {}
                 _ = stop_rx.changed() => {

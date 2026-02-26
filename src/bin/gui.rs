@@ -69,9 +69,9 @@ fn spawn_worker(url: String, threshold_mbps: f64, streams: usize, mode: Selectio
 
             let prefer_first = !url.trim().is_empty();
             let candidates = build_candidate_urls(Some(&url));
-            let selected = select_available_url(&candidates, prefer_first, mode, streams, &client, Some(log.clone())).await;
+            let selection = select_available_url(&candidates, prefer_first, mode, streams, &client, Some(log.clone())).await;
 
-            run_monitor_loop(&selected, &client, &config, stop_rx, log).await;
+            run_monitor_loop(&selection.rotation_targets, &client, &config, stop_rx, log).await;
         });
     });
 
@@ -83,7 +83,7 @@ fn spawn_worker(url: String, threshold_mbps: f64, streams: usize, mode: Selectio
 
 fn App() -> Element {
     let mut url = use_signal(|| String::new());
-    let mut threshold = use_signal(|| 20.0_f64);
+    let mut threshold = use_signal(|| Config::default().threshold_mbps);
     let mut streams = use_signal(|| Config::default().streams);
     let mut select_mode = use_signal(|| SelectionMode::Latency.as_str().to_string());
     let mut running = use_signal(|| false);
@@ -135,6 +135,9 @@ fn App() -> Element {
             logs.with_mut(|l| {
                 l.clear();
                 l.push_back("[интерфейс] запуск...".to_string());
+                if cfg!(target_os = "android") {
+                    l.push_back("[интерфейс] android: если приложение выгружено из фона, откройте его и нажмите «Запустить».".to_string());
+                }
             });
 
             let mode = SelectionMode::from_str(&select_mode());
@@ -170,6 +173,12 @@ fn App() -> Element {
 
             h1 { style: "margin: 0 0 8px 0;", "Насыщатор Anti-Collision" }
             p { style: "margin: 0 0 16px 0; color: #444;", "Настольный интерфейс Dioxus (без трея)" }
+            if cfg!(target_os = "android") {
+                div {
+                    style: "margin: 0 0 12px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid #ffd8a8; background: #fff4e6; color: #8a4b08;",
+                    "Android: ОС может остановить приложение в фоне. Если через час новая проверка не началась, откройте приложение и нажмите «Запустить»."
+                }
+            }
 
             div { style: "display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; margin-bottom: 12px;",
                 label { "Сервер" }
