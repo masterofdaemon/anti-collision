@@ -19,7 +19,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            threshold_mbps: 60.0,
+            threshold_mbps: 30.0,
             sleep_duration: Duration::from_secs(3600),
             check_duration: Duration::from_secs(5),
             streams: 8,
