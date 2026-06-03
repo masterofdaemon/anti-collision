@@ -17,16 +17,17 @@ This tool implements an intelligent state machine to fix the connection *only wh
     - It measures the real-time throughput.
 
 2.  **🧠 Decision Logic**
-    - **Threshold**: `20 Mbps`
-    - **Case A (Healthy)**: If speed is **≥ 20 Mbps**, the connection is considered good.
+    - **Threshold**: `30 Mbps`
+    - **Case A (Healthy)**: If speed is **≥ 30 Mbps**, the connection is considered good.
         - Action: **Sleep for 1 hour**. The tool stays quiet.
-    - **Case B (Degraded)**: If speed is **< 20 Mbps**, the connection is considered "colliding" or unstable.
+    - **Case B (Degraded)**: If speed is **< 30 Mbps**, the connection is considered "colliding" or unstable.
         - Action: Enter **Saturation Mode**.
 
 3.  **🌊 Saturation Mode (The Fix)**
-    - The tool opens **4 concurrent, high-speed download streams**.
+    - The tool opens **8 concurrent, high-speed download streams**.
     - This saturates the bandwidth (typically reaching 100-200+ Mbps).
-    - **Recovery Condition**: It keeps saturating until the speed stays above **20 Mbps** for at least **15 continuous seconds**.
+    - **Recovery Condition**: It keeps saturating until the speed stays above **30 Mbps** for at least **15 continuous seconds**.
+    - **Crash Guard**: If saturation does not improve by at least **1 Mbps** for **2 minutes**, the process exits with code `101` so an external watchdog can restart/report it.
     - Once recovered, it returns to the **Sleep** cycle.
 
 ## 🚀 Usage
@@ -67,10 +68,12 @@ cargo run --release -- https://example.com/large-file.bin
 
 ## 🛠 Configuration
 The behavior is controlled by constants in `src/main.rs`:
-- `THRESHOLD_MBPS`: Speed required to be considered "Healthy" (Default: `20.0`).
+- `THRESHOLD_MBPS`: Speed required to be considered "Healthy" (Default: `30.0`).
 - `SLEEP_DURATION`: How long to rest after a healthy check (Default: `3600s` / 1 hour).
 - `CHECK_DURATION`: Duration of the initial speed sample (Default: `5s`).
-- `STREAMS`: Number of parallel download connections (Default: `4`).
+- `STREAMS`: Number of parallel download connections (Default: `8`).
+- `SATURATION_STAGNATION_TIMEOUT`: Maximum saturation time without meaningful growth (Default: `120s`).
+- `SATURATION_MIN_GROWTH_MBPS`: Growth required to reset the stagnation timer (Default: `1.0` Mbps).
 
 ## 📊 Logs
 The tool logs all actions with timestamps for easy debugging:
